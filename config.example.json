@@ -1,0 +1,38 @@
+{
+  "server": {
+    "host": "127.0.0.1",
+    "port": 8765,
+    "open_browser_on_start": true
+  },
+  "llm": {
+    "mode": "auto",
+    "provider": "groq",
+    "base_url": "https://api.groq.com/openai/v1",
+    "model": "llama-3.3-70b-versatile",
+    "n_ctx": 8192,
+    "temperature": 0.6,
+    "max_tokens": 1200,
+    "timeout": 600,
+    "system_prompt": "You are Paradigme, a research and scenario analysis assistant. Return valid JSON only. Write natural-language values in English while preserving the requested schema keys and enum IDs. Ground factual claims in supplied excerpts, cite sources, state uncertainty, and describe future scenarios conditionally. Never invent evidence or present illustrative scores as measured probabilities.",
+    "groq": {
+      "enabled": true,
+      "api_key": "",
+      "model": "llama-3.3-70b-versatile",
+      "timeout": 120
+    }
+  },
+  "email": {
+    "enabled": false,
+    "smtp_host": "",
+    "smtp_port": 465,
+    "smtp_user": "",
+    "smtp_password": "",
+    "from_addr": "",
+    "to_addr": "",
+    "use_tls": false
+  },
+  "ui": {
+    "theme": "light",
+    "language": "en"
+  }
+}

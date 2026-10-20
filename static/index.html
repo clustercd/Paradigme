@@ -1,0 +1,406 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Paradigme - Structured reflection</title>
+<link rel="stylesheet" href="/static/style.css">
+<script src="https://d3js.org/d3.v7.min.js"></script>
+</head>
+<body>
+<header class="topbar">
+  <div class="brand">
+    <span class="logo">P</span>
+    <div>
+      <h1>Paradigme</h1>
+      <p>Research, sector analysis, decision trees, and exploratory scenarios</p>
+    </div>
+  </div>
+  <nav>
+    <button class="nav-btn active" data-tab="analyze">Analyze</button>
+    <button class="nav-btn" data-tab="help">Help</button>
+    <button class="nav-btn" data-tab="history">History</button>
+    <button class="nav-btn" data-tab="settings">Settings</button>
+    <span id="llm-status" class="status status-unknown" title="LLM">LLM ?</span>
+    <button class="nav-btn" id="btn-logs" title="Logs" style="font-size:.85em;padding:6px 10px;position:relative" onclick="toggleLogs()">Logs <span id="log-badge" style="display:none;position:absolute;top:2px;right:2px;width:8px;height:8px;border-radius:50%;background:#c97064"></span></button>
+  </nav>
+</header>
+
+<!-- Raw log drawer opened by the Logs button -->
+<div id="logs-panel" style="display:none;position:fixed;top:0;right:0;width:520px;max-width:96vw;height:100vh;background:var(--bg,#fff);border-left:1px solid var(--border,#ddd);z-index:9999;flex-direction:column;box-shadow:-4px 0 20px rgba(0,0,0,0.15)">
+  <div style="display:flex;align-items:center;justify-content:space-between;padding:14px 18px;border-bottom:1px solid var(--border,#ddd)">
+    <div style="font-weight:600;font-size:1.05em">Logs <span id="log-count" style="font-weight:400;font-size:.85em;color:var(--muted,#888)"></span></div>
+    <div style="display:flex;gap:8px">
+      <button onclick="refreshLogs()" class="btn-secondary small" style="font-size:.8em;padding:4px 10px">Refresh</button>
+      <button onclick="clearLogs()" class="btn-secondary small" style="font-size:.8em;padding:4px 10px;color:#c97064">Clear</button>
+      <button onclick="toggleLogs()" style="background:none;border:none;font-size:1.3em;cursor:pointer;color:var(--text,#333);padding:0 4px">&times;</button>
+    </div>
+  </div>
+  <div id="logs-content" style="flex:1;overflow-y:auto;padding:12px 18px;font-family:'Cascadia Code','Consolas',monospace;font-size:.8em;line-height:1.7;white-space:pre-wrap;word-break:break-all;color:var(--text,#333)">No logs.</div>
+</div>
+
+<!-- Live progress checklist during analysis -->
+<div id="checklist-widget" style="display:none;position:fixed;bottom:18px;right:18px;width:340px;max-height:60vh;background:rgba(255,255,255,0.97);border:1px solid #d4c5a8;border-radius:12px;box-shadow:0 6px 24px rgba(0,0,0,0.12);z-index:9998;font-size:.85em;overflow:hidden;backdrop-filter:blur(4px)">
+  <div id="checklist-header" style="padding:10px 14px;background:linear-gradient(180deg,#e8dcc4,#dccca8);font-weight:600;display:flex;align-items:center;justify-content:space-between;cursor:pointer;color:#5a4a30" onclick="toggleChecklist()">
+    <span><span id="checklist-spinner" style="display:inline-block;width:10px;height:10px;border:2px solid #5a4a30;border-top-color:transparent;border-radius:50%;animation:cklspin 0.8s linear infinite;margin-right:8px;vertical-align:middle"></span>Analysis running</span>
+    <span id="checklist-toggle" style="font-size:1.1em">−</span>
+  </div>
+  <div id="checklist-body" style="max-height:50vh;overflow-y:auto;padding:8px 4px">
+    <ul id="checklist-items" style="list-style:none;margin:0;padding:0"></ul>
+  </div>
+</div>
+<style>
+@keyframes cklspin { to { transform: rotate(360deg); } }
+.ckl-item { padding:6px 14px;display:flex;align-items:flex-start;gap:8px;border-bottom:1px solid rgba(0,0,0,0.04);line-height:1.4 }
+.ckl-item:last-child { border-bottom:none }
+.ckl-icon { flex-shrink:0;width:16px;text-align:center;font-weight:bold }
+.ckl-done .ckl-icon { color:#5a8a6b }
+.ckl-run .ckl-icon { color:#d4a574 }
+.ckl-pending .ckl-icon { color:#aaa }
+.ckl-err .ckl-icon { color:#c97064 }
+.ckl-text { flex:1;color:#333 }
+.ckl-pending .ckl-text { color:#888 }
+.ckl-detail { font-size:.85em;color:#888;margin-left:24px;font-style:italic }
+</style>
+
+<main>
+  <section id="tab-analyze" class="tab active">
+    <div class="card input-card">
+      <label for="subject">Subject, question, or idea</label>
+      <textarea id="subject" rows="3" placeholder="Example: How might open-source AI adoption affect small software teams?"></textarea>
+
+      <label for="context">Additional context (optional)</label>
+      <textarea id="context" rows="2" placeholder="Relevant background and constraints."></textarea>
+
+      <fieldset class="sources-fieldset model-fieldset">
+        <legend>Analysis model</legend>
+        <label class="check"><input type="radio" name="analysis-model" value="turchin"> <strong>Turchin (Cliodynamics)</strong> <span class="model-desc">Secular cycles, PSI, Lotka-Volterra, phase space, and timelines</span></label>
+        <label class="check"><input type="radio" name="analysis-model" value="classique" checked> <strong>Classic (Sector analysis)</strong> <span class="model-desc">Cross-sector analysis with a decision tree</span></label>
+      </fieldset>
+
+      <div class="fieldset-row">
+      <fieldset class="sources-fieldset compact">
+        <legend>Analysis perspectives</legend>
+        <label class="check" style="font-weight:600;margin-bottom:2px"><input type="checkbox" id="ctx-all" checked> All</label>
+        <label class="check"><input type="checkbox" id="ctx-social" checked> Social</label>
+        <label class="check"><input type="checkbox" id="ctx-economique" checked> Economic</label>
+        <label class="check"><input type="checkbox" id="ctx-mondial" checked> Global / Geopolitical</label>
+        <label class="check"><input type="checkbox" id="ctx-humanitaire" checked> Humanitarian</label>
+        <label class="check"><input type="checkbox" id="ctx-philosophique" checked> Philosophical / Ethical</label>
+        <label class="check"><input type="checkbox" id="ctx-educationnel" checked> Educational</label>
+        <label class="check"><input type="checkbox" id="ctx-technologique" checked> Technological</label>
+        <label class="check"><input type="checkbox" id="ctx-environnemental" checked> Environmental</label>
+        <label class="check"><input type="checkbox" id="ctx-juridique" checked> Legal / Regulatory</label>
+        <label class="check"><input type="checkbox" id="ctx-culturel" checked> Cultural</label>
+        <label class="check"><input type="checkbox" id="ctx-sanitaire" checked> Public health</label>
+        <label class="check"><input type="checkbox" id="ctx-financier" checked> Financial / Markets</label>
+      </fieldset>
+
+      <fieldset class="sources-fieldset compact">
+        <legend>Research sources</legend>
+        <label class="check"><input type="checkbox" id="src-web" checked> Web (DuckDuckGo)</label>
+        <label class="check"><input type="checkbox" id="src-wikipedia" checked> Wikipedia (English)</label>
+        <label class="check"><input type="checkbox" id="src-actualite" checked> News (Google News)</label>
+        <label class="check"><input type="checkbox" id="src-youtube" checked> YouTube (videos/shorts)</label>
+        <label class="check"><input type="checkbox" id="src-archive" checked> Web archives and books (archive.org)</label>
+        <label class="check"><input type="checkbox" id="src-deep" checked> Read full page excerpts</label>
+      </fieldset>
+      </div>
+
+      <div class="options-row">
+        <label class="check"><input type="checkbox" id="opt-pdf" checked> PDF report</label>
+        <label class="check"><input type="checkbox" id="opt-mail"> Send by email</label>
+        <button id="btn-analyze" class="primary">Start analysis</button>
+      </div>
+
+      <div id="progress" class="progress hidden">
+        <div class="bar"><div class="fill" style="width:0%"></div></div>
+        <div class="step-label">waiting...</div>
+        <div class="step-detail" style="font-size:.85em;color:#888;margin-top:4px"></div>
+        <div class="step-timer" style="font-size:.8em;color:#aaa;margin-top:2px;font-family:monospace"></div>
+      </div>
+      <div id="error-box" class="error hidden"></div>
+    </div>
+
+    <div id="results" class="results hidden">
+      <div class="card meta-card">
+        <div class="meta-line">
+          <span><b>Analysis model :</b> <code id="r-analysis-model">?</code></span>
+          <span><b>LLM model :</b> <code id="r-model">?</code></span>
+          <span><b>Server :</b> <code id="r-server">?</code></span>
+          <span><b>Sources :</b> <code id="r-srccount">0</code></span>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2>Executive synthesis</h2>
+        <p id="r-synthese"></p>
+        <div class="two-col">
+          <div><h3>Immediate actions</h3><ul id="r-actions"></ul></div>
+          <div><h3>Questions to consider</h3><ul id="r-questions"></ul></div>
+        </div>
+        <div class="actions">
+          <a id="r-pdf" class="btn-secondary hidden" target="_blank">Download PDF</a>
+          <a id="r-txt" class="btn-secondary hidden" target="_blank" style="margin-left:8px">Download text (.txt)</a>
+          <span id="r-mail" class="mail-status"></span>
+        </div>
+      </div>
+
+      <!-- TURCHIN SECTION (shown for the Turchin model) -->
+      <div id="turchin-section" class="hidden">
+        <div class="card turchin-card">
+          <h2>Turchin-inspired cliodynamic analysis</h2>
+
+          <div class="turchin-grid">
+            <div class="turchin-phase" id="t-phase-card">
+              <div class="phase-badge" id="t-phase-badge">?</div>
+              <div class="phase-info">
+                <h3>Secular cycle phase</h3>
+                <p id="t-phase-justification"></p>
+                <div class="phase-progress">
+                  <div class="phase-bar"><div class="phase-fill" id="t-phase-fill"></div></div>
+                  <span id="t-phase-position" class="phase-pos"></span>
+                </div>
+              </div>
+            </div>
+
+            <div class="psi-card">
+              <h3>PSI - Political Stress Index</h3>
+              <div class="psi-global" id="t-psi-global">0</div>
+              <div class="psi-bars">
+                <div class="psi-bar-item">
+                  <span class="psi-label">MMP (Popular stress)</span>
+                  <div class="psi-bar"><div class="psi-fill" id="t-psi-mmp"></div></div>
+                  <span class="psi-score" id="t-psi-mmp-score">0</span>
+                </div>
+                <div class="psi-bar-item">
+                  <span class="psi-label">EMP (Elites)</span>
+                  <div class="psi-bar"><div class="psi-fill" id="t-psi-emp"></div></div>
+                  <span class="psi-score" id="t-psi-emp-score">0</span>
+                </div>
+                <div class="psi-bar-item">
+                  <span class="psi-label">SFD (Institutions)</span>
+                  <div class="psi-bar"><div class="psi-fill" id="t-psi-sfd"></div></div>
+                  <span class="psi-score" id="t-psi-sfd-score">0</span>
+                </div>
+              </div>
+              <p id="t-psi-interpretation" class="psi-interp"></p>
+            </div>
+          </div>
+
+          <div class="turchin-grid">
+            <div class="lv-card">
+              <h3>Lotka-Volterra dynamics</h3>
+              <div class="two-col">
+                <div>
+                  <h4 style="color:var(--negative)">Predators (resource-concentrating actors)</h4>
+                  <ul id="t-lv-predateurs"></ul>
+                </div>
+                <div>
+                  <h4 style="color:var(--positive)">Prey (resources/populations)</h4>
+                  <ul id="t-lv-proies"></ul>
+                </div>
+              </div>
+              <p id="t-lv-dynamique" style="margin-top:8px;font-style:italic;color:var(--muted)"></p>
+              <div id="t-lv-viz" class="lv-viz"></div>
+            </div>
+
+            <div class="ep-card">
+              <h3>Phase space (four dimensions)</h3>
+              <div id="t-ep-radar" class="ep-radar"></div>
+              <p id="t-ep-diagnostic" style="font-style:italic;color:var(--muted);margin-top:8px"></p>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2>Sources consulted <span id="r-srctitle" class="muted-small"></span></h2>
+        <div id="r-queries" class="queries-list"></div>
+        <div id="r-sources" class="sources-list"></div>
+      </div>
+
+      <div class="card">
+        <h2 id="sectors-title">Current situation (360°)</h2>
+        <p id="r-resume" class="resume"></p>
+        <div id="r-sectors" class="sectors-grid"></div>
+        <div class="two-col">
+          <div><h3>Indirect effects</h3><ul id="r-collateraux"></ul></div>
+          <div><h3>Early signals</h3><ul id="r-signaux"></ul></div>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2>Consequence decision tree</h2>
+        <div id="tree-controls">
+          <button id="tree-expand" class="btn-secondary small">Expand all</button>
+          <button id="tree-collapse" class="btn-secondary small">Collapse all</button>
+          <span class="legend">
+            <i class="leg decision"></i> decision
+            <i class="leg consequence"></i> consequence
+            <i class="leg risque"></i> risk
+            <i class="leg opportunite"></i> opportunity
+          </span>
+        </div>
+        <div id="tree-viz"></div>
+      </div>
+
+      <div class="card">
+        <h2>Time scenarios</h2>
+        <div id="r-horizons" class="horizons"></div>
+        <div class="two-col">
+          <div><h3>Possible disruptions</h3><ul id="r-ruptures"></ul></div>
+          <div><h3>Strategic recommendations</h3><ul id="r-recos"></ul></div>
+        </div>
+      </div>
+
+      <!-- TIMELINE GLOBALE (carte independante) -->
+      <div class="card hidden" id="timeline-section">
+        <h2>Timeline - Historical precedents and scenarios</h2>
+        <p id="timeline-context" class="resume"></p>
+        <div id="timeline-viz" class="timeline-container"></div>
+        <div id="timeline-legend" class="timeline-legend">
+          <span class="tl-leg"><i class="tl-dot past"></i> Past</span>
+          <span class="tl-leg"><i class="tl-dot present"></i> Present</span>
+          <span class="tl-leg"><i class="tl-dot future"></i> Projection</span>
+          <span class="tl-leg"><i class="tl-dot effondrement"></i> Collapse</span>
+          <span class="tl-leg"><i class="tl-dot revolution"></i> Revolution</span>
+          <span class="tl-leg"><i class="tl-dot guerre"></i> War</span>
+          <span class="tl-leg"><i class="tl-dot famine"></i> Famine/Crisis</span>
+        </div>
+      </div>
+
+      <!-- Future scenario details (independent card) -->
+      <div class="card hidden" id="projections-detail-card">
+        <h2>Scenario details - Possible future events</h2>
+        <p style="color:var(--muted);font-size:.9em;margin-bottom:14px">These are conditional scenarios inspired by historical analogies. Dates and probabilities are illustrative, not calibrated predictions.</p>
+        <div id="projections-detail-list"></div>
+      </div>
+
+      <!-- Regional timelines (independent card) -->
+      <div class="card hidden" id="regional-card">
+        <h2>Regional perspectives</h2>
+        <p style="color:var(--muted);font-size:.9em;margin-bottom:14px">
+          Select a region to explore its history and conditional scenarios. Regional interpretations may omit important local diversity and need independent verification.
+        </p>
+        <div id="regional-tabs" style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:14px"></div>
+        <div id="regional-content"></div>
+      </div>
+
+      <div class="card">
+        <h2>Synthesis and conclusion</h2>
+        <p id="r-synthese-bottom"></p>
+        <div class="two-col">
+          <div><h3>Immediate actions</h3><ul id="r-actions-bottom"></ul></div>
+          <div><h3>Questions to consider</h3><ul id="r-questions-bottom"></ul></div>
+        </div>
+        <div style="margin-top:16px">
+          <h3>Answers to questions</h3>
+          <div id="r-answers-bottom"></div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section id="tab-help" class="tab">
+    <div class="card">
+      <h2>How Paradigme works</h2>
+      <p>Paradigme organizes research into an executive synthesis, sector impacts,
+      decision branches, and conditional scenarios. Choose Classic for sector
+      analysis or Turchin for an exploratory historical-cycle perspective.</p>
+      <p>The workflow generates search queries, collects public sources, asks your
+      configured LLM to analyze excerpts, checks basic output quality, and optionally
+      produces PDF and text reports. Completed results remain in local history.</p>
+      <h3>Interpreting the results</h3>
+      <p>Check cited sources and distinguish evidence from interpretation. Quality
+      scores check structure and citation coverage; they do not establish truth.
+      Probabilities, PSI scores, phase positions, and timelines are LLM-generated
+      judgments, not calibrated forecasts or a validated scientific model. The
+      predator/prey curve is illustrative. Long-term scenarios are especially uncertain.</p>
+      <h3>Data and connections</h3>
+      <p>Search queries go to the selected public research services. Source excerpts
+      and your subject/context go to your configured LLM, which may be a cloud
+      provider. Email delivery is optional. Configuration, credentials, logs, and
+      results stay in ignored local files. Keep the server on the loopback interface.</p>
+      <h3>Example subjects</h3>
+      <div class="examples-grid">
+        <button class="example-btn" data-subject="How might open-source AI adoption affect small software teams?">Open-source AI in small teams</button>
+        <button class="example-btn" data-subject="What conditions could improve urban water resilience?">Urban water resilience</button>
+        <button class="example-btn" data-subject="How could remote collaboration change technical education?">Remote technical education</button>
+      </div>
+      <h3>Getting useful results</h3>
+      <p>Use a specific subject, define a place and period when relevant, and add
+      necessary context. Avoid including private details you do not want sent to
+      an external provider. Review evidence before acting on any generated output.</p>
+    </div>
+  </section>
+
+  <section id="tab-history" class="tab">
+    <div class="card">
+      <h2>Analysis history</h2>
+      <button id="refresh-history" class="btn-secondary small">Refresh</button>
+      <div id="history-list"></div>
+    </div>
+  </section>
+
+  <section id="tab-settings" class="tab">
+    <div class="card">
+      <h2>LLM settings</h2>
+      <div class="form-grid">
+        <label>LLM provider
+          <select id="cfg-llm-provider">
+            <option value="groq">Groq Cloud</option>
+            <option value="openai">OpenAI / ChatGPT</option>
+            <option value="anthropic">Anthropic / Claude</option>
+            <option value="ollama">Ollama (local)</option>
+            <option value="llamacpp">llama.cpp (local)</option>
+            <option value="bridge">Shared local bridge</option>
+            <option value="custom">Custom (OpenAI-compatible)</option>
+          </select>
+        </label>
+        <label>API key <input id="cfg-llm-apikey" type="password" placeholder="gsk_... / sk-... (blank for local providers)"></label>
+        <label>Server URL <input id="cfg-llm-url" type="text" placeholder="default for selected provider"></label>
+        <label>Model name <input id="cfg-llm-model" type="text" placeholder="default for selected provider"></label>
+        <label>Temperature <input id="cfg-llm-temp" type="number" step="0.05" min="0" max="2"></label>
+        <label>Max tokens <input id="cfg-llm-max" type="number" min="256" max="32768"></label>
+        <label>Timeout (s) <input id="cfg-llm-timeout" type="number" min="30" max="3600"></label>
+        <label class="full">System prompt <textarea id="cfg-llm-sys" rows="3"></textarea></label>
+      </div>
+      <div style="font-size:.85em;color:var(--muted);margin:8px 0" id="cfg-llm-hint"></div>
+      <button id="btn-test-llm" class="btn-secondary">Test</button>
+      <span id="llm-test-result"></span>
+    </div>
+    <div class="card">
+      <h2>Email settings</h2>
+      <div class="form-grid">
+        <label class="check"><input type="checkbox" id="cfg-mail-enabled"> Enable sending</label>
+        <label>SMTP host <input id="cfg-smtp-host" type="text"></label>
+        <label>SMTP port <input id="cfg-smtp-port" type="number"></label>
+        <label>Username <input id="cfg-smtp-user" type="text"></label>
+        <label>Password <input id="cfg-smtp-pwd" type="password" placeholder="(unchanged when blank)"></label>
+        <label>Sender <input id="cfg-from" type="email"></label>
+        <label>Recipient <input id="cfg-to" type="email"></label>
+        <label class="check"><input type="checkbox" id="cfg-tls"> STARTTLS</label>
+      </div>
+      <button id="btn-save-cfg" class="primary">Save</button>
+      <button id="btn-test-mail" class="btn-secondary">Send test email</button>
+      <button id="btn-test-research" class="btn-secondary">Test research</button>
+      <span id="mail-test-result"></span>
+    </div>
+    <div class="card">
+      <h2>About</h2>
+      <p>Paradigme v3.0 - Classic sector analysis and Turchin-inspired scenarios</p>
+      <p>Compatible : Groq, OpenAI/ChatGPT, Anthropic/Claude, Ollama, llama.cpp, LM Studio, vLLM.</p>
+    </div>
+  </section>
+</main>
+
+<script>
+// Aliases globaux - necessite d'etre defini AVANT app.js
+window['\u0024'] = function(sel) { return document.querySelector(sel); };
+window['\u0024\u0024'] = function(sel) { return Array.from(document.querySelectorAll(sel)); };
+</script>
+<script src="/static/app.js"></script>
+<script src="/static/setup.js"></script>
+</body>
+</html>

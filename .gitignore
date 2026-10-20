@@ -1,0 +1,31 @@
+# Local configuration and credentials
+config.json
+.ctpm.json
+.env
+.env.*
+!.env.example
+*.key
+# Private inputs, results, logs, and backups
+data/
+logs/
+dist/
+.local/
+*.log
+*.bak
+*.zip
+*privacy-denylist*
+# Environments and generated files
+paradigme_venv/
+venv/
+.venv/
+env/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+# Editor and operating system files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+desktop.ini
