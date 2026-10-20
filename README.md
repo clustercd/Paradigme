@@ -4,6 +4,34 @@ Paradigme is a local web application for researching a subject and exploring its
 possible consequences with an LLM: public-source research, sector analysis,
 decision trees, conditional scenarios, and PDF/text reports.
 
+## At a glance
+
+| Built for | Core stack | Default interface |
+| --- | --- | --- |
+| Source-based research and scenario exploration | Python, configured LLM, browser UI | Local dashboard on port 8765 |
+
+## How it works
+
+```text
+Subject + context -> selected public sources -> collected evidence
+Evidence + configured LLM -> sector analysis and scenarios -> PDF/text report
+```
+
+Research queries go to the selected source services. Collected context is passed
+to the configured model for analysis. The resulting report is a working document:
+check its evidence and assumptions before relying on its conclusions.
+
+## Example workflows
+
+| Goal | Example input | What to review |
+| --- | --- | --- |
+| Explore a technology trend | “How might local AI adoption affect small software teams?” | Sources, sector effects and conditional scenarios |
+| Compare assumptions | Run the same subject with two explicitly different contexts | Which conclusions depend on each assumption |
+| Share a research draft | Open a completed analysis and export its PDF or text report | Citations, uncertainty and model-generated claims |
+
+See [a complete research walkthrough](docs/EXAMPLES.md), including model selection and report review.
+
+
 ## Getting started
 
 Requirements: Python 3.10 or newer, a browser, and a supported LLM server or cloud
