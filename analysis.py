@@ -216,11 +216,13 @@ def _assess_result_quality(result, req):
     report_sections = (
         result.get("synthesis"), result.get("sectors"), result.get("tree"),
         result.get("projections"), result.get("turchin"), result.get("timeline"),
+        result.get("regional_timelines"),
     )
     cited_refs = set()
     for section in report_sections:
         for text in _report_text_values(section):
             cited_refs.update(int(value) for value in re.findall(r"\[(\d+)\]", text))
+        cited_refs.update(_structured_source_references(section))
 
     source_refs = []
     invalid_source_refs = False
@@ -318,6 +320,33 @@ def _report_text_values(value):
     elif isinstance(value, (list, tuple)):
         for item in value:
             yield from _report_text_values(item)
+
+
+def _structured_source_references(value):
+    """Yield source IDs stored in structured citation fields."""
+    reference_fields = {"citations", "sources_principales_utilisees"}
+
+    def values(item):
+        if isinstance(item, int) and not isinstance(item, bool) and item > 0:
+            yield item
+        elif isinstance(item, str) and item.isdigit() and int(item) > 0:
+            yield int(item)
+        elif isinstance(item, (list, tuple)):
+            for child in item:
+                yield from values(child)
+
+    def walk(item):
+        if isinstance(item, dict):
+            for key, child in item.items():
+                if key in reference_fields:
+                    yield from values(child)
+                else:
+                    yield from walk(child)
+        elif isinstance(item, (list, tuple)):
+            for child in item:
+                yield from walk(child)
+
+    yield from walk(value)
 
 
 def _summary_has_citations(candidate):
