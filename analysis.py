@@ -211,8 +211,32 @@ def _assess_result_quality(result, req):
         for source in sources if isinstance(source, dict)
         for key in ("title", "snippet", "content_excerpt")
     ).lower()
-    cited_refs = {int(value) for value in re.findall(r"\[(\d{1,3})\]", summary)}
-    known_refs = {int(source.get("ref")) for source in sources if isinstance(source, dict) and str(source.get("ref", "")).isdigit()}
+    # Check references across every fact-bearing report section, not just the
+    # executive summary. Source records themselves are deliberately excluded.
+    report_sections = (
+        result.get("synthesis"), result.get("sectors"), result.get("tree"),
+        result.get("projections"), result.get("turchin"), result.get("timeline"),
+    )
+    cited_refs = set()
+    for section in report_sections:
+        for text in _report_text_values(section):
+            cited_refs.update(int(value) for value in re.findall(r"\[(\d+)\]", text))
+
+    source_refs = []
+    invalid_source_refs = False
+    for source in sources:
+        if not isinstance(source, dict):
+            continue
+        value = source.get("ref")
+        if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+            source_refs.append(value)
+        elif isinstance(value, str) and value.isdigit() and int(value) > 0:
+            source_refs.append(int(value))
+        else:
+            invalid_source_refs = True
+    known_refs = set(source_refs)
+    duplicate_refs = {value for value in known_refs if source_refs.count(value) > 1}
+    unknown_refs = cited_refs - known_refs
     factual_sentences = [s.strip() for s in re.split(r"(?<=[.!?])\s+", summary) if len(s.strip()) >= 30]
     cited_sentences = [s for s in factual_sentences if re.search(r"\[\d{1,3}\]", s)]
     raw_numbers = [n for n in re.findall(r"\b\d+(?:[.,]\d+)?\b", re.sub(r"\[\d{1,3}\]", "", summary)) if len(n) >= 2]
@@ -251,10 +275,19 @@ def _assess_result_quality(result, req):
         score += 15
     else:
         issues.append("insufficient citation coverage in the summary")
-    if cited_refs.issubset(known_refs):
+    citations_valid = bool(cited_refs) and not unknown_refs and not invalid_source_refs and not duplicate_refs
+    if citations_valid:
         score += 5
     else:
-        issues.append("unknown source reference")
+        if not cited_refs:
+            issues.append("no source references found in factual report sections")
+        if unknown_refs:
+            issues.append("unknown source references: " + ", ".join(f"[{ref}]" for ref in sorted(unknown_refs)))
+        if invalid_source_refs:
+            issues.append("source list contains invalid reference identifiers")
+        if duplicate_refs:
+            issues.append("source list contains duplicate reference identifiers: " +
+                          ", ".join(f"[{ref}]" for ref in sorted(duplicate_refs)))
     if not unsupported_numbers:
         score += 5
     else:
@@ -265,11 +298,26 @@ def _assess_result_quality(result, req):
     score = max(0, min(100, score))
     return {
         "score": score,
-        "usable": score >= 65 and not low and not unsupported_numbers and enough_sources,
+        "usable": score >= 65 and not low and not unsupported_numbers and enough_sources and citations_valid,
         "issues": issues,
         "citation_coverage": round(len(cited_sentences) / max(1, len(factual_sentences)), 2),
         "unsupported_numbers": unsupported_numbers,
+        "cited_references": sorted(cited_refs),
+        "unknown_references": sorted(unknown_refs),
+        "citation_note": "Reference checks confirm only that a cited source exists; they do not verify that it supports the claim.",
     }
+
+
+def _report_text_values(value):
+    """Yield text leaves from fact-bearing report sections for citation checks."""
+    if isinstance(value, str):
+        yield value
+    elif isinstance(value, dict):
+        for item in value.values():
+            yield from _report_text_values(item)
+    elif isinstance(value, (list, tuple)):
+        for item in value:
+            yield from _report_text_values(item)
 
 
 def _summary_has_citations(candidate):
@@ -603,7 +651,7 @@ def _update_step(j, step, pct, detail=""):
     j["status"] = "running"
     j["step_started_at"] = datetime.now().isoformat()
     jid = j.get("id", "?")[:8]
-    log.info(f"[{jid}] STEP {pct:>3}%% | {step}{(' — ' + detail) if detail else ''}")
+    log.info(f"[{jid}] STEP {pct:>3}%% | {step}{('   ' + detail) if detail else ''}")
 
 
 def _assemble_turchin(phase, phase_data, mmp, emp, sfd, psi_global,
