@@ -175,6 +175,35 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(quality["usable"])
         self.assertIn("[999]", " ".join(quality["issues"]))
 
+    def test_quality_rejects_unknown_reference_in_regional_timelines(self):
+        result = synthetic_result()
+        result["regional_timelines"] = [{"region": "Synthetic region", "events": [
+            {"description": "An event with no matching source [999]."}
+        ]}]
+        quality = analysis._assess_result_quality(result, app.AnalyzeRequest(subject=result["subject"]))
+        self.assertFalse(quality["usable"])
+        self.assertIn(999, quality["unknown_references"])
+
+    def test_quality_rejects_unknown_structured_reference(self):
+        result = synthetic_result()
+        result["sectors"]["secteurs"][0]["citations"] = [999]
+        quality = analysis._assess_result_quality(result, app.AnalyzeRequest(subject=result["subject"]))
+        self.assertFalse(quality["usable"])
+        self.assertIn(999, quality["unknown_references"])
+
+    def test_quality_accepts_known_structured_and_regional_references(self):
+        result = synthetic_result()
+        result["sectors"]["secteurs"][0]["citations"] = [1]
+        result["tree"]["tree"]["citations"] = [2]
+        result["synthesis"]["sources_principales_utilisees"] = ["3"]
+        result["regional_timelines"] = [{"region": "Synthetic region", "events": [
+            {"description": "A cited event from the fixture [3]."}
+        ]}]
+        quality = analysis._assess_result_quality(result, app.AnalyzeRequest(subject=result["subject"]))
+        self.assertTrue(quality["usable"], quality["issues"])
+        self.assertEqual(quality["unknown_references"], [])
+        self.assertEqual(quality["cited_references"], [1, 2, 3])
+
     def test_quality_rejects_incoherent_source_identifiers(self):
         result = synthetic_result()
         for source in result["research"]["sources"]:
