@@ -143,6 +143,53 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(jobs["fixture"]["status"], "error")
         send.assert_not_called()
 
+    def test_quality_accepts_consistent_synthetic_source_references(self):
+        result = synthetic_result()
+        quality = analysis._assess_result_quality(result, app.AnalyzeRequest(subject=result["subject"]))
+        self.assertTrue(quality["usable"], quality["issues"])
+        self.assertEqual(quality["cited_references"], [1])
+        self.assertEqual(quality["unknown_references"], [])
+        self.assertIn("do not verify", quality["citation_note"])
+
+    def test_quality_rejects_unknown_reference_in_summary(self):
+        result = synthetic_result()
+        result["synthesis"]["synthese"] += " This unsupported detail has no source record [999]."
+        quality = analysis._assess_result_quality(result, app.AnalyzeRequest(subject=result["subject"]))
+        self.assertFalse(quality["usable"])
+        self.assertIn("[999]", " ".join(quality["issues"]))
+        self.assertEqual(quality["unknown_references"], [999])
+
+    def test_quality_rejects_missing_references(self):
+        result = synthetic_result()
+        result["synthesis"]["synthese"] = result["synthesis"]["synthese"].replace("[1]", "")
+        result["sectors"]["resume_situation"] = result["sectors"]["resume_situation"].replace("[1]", "")
+        result["sectors"]["secteurs"][0]["effets_actuels"] = ["The fixture describes review practices."]
+        quality = analysis._assess_result_quality(result, app.AnalyzeRequest(subject=result["subject"]))
+        self.assertFalse(quality["usable"])
+        self.assertIn("no source references found", " ".join(quality["issues"]))
+
+    def test_quality_rejects_unknown_references_outside_summary(self):
+        result = synthetic_result()
+        result["projections"]["horizons"][0]["scenarios"][0]["narratif"] += " [999]"
+        quality = analysis._assess_result_quality(result, app.AnalyzeRequest(subject=result["subject"]))
+        self.assertFalse(quality["usable"])
+        self.assertIn("[999]", " ".join(quality["issues"]))
+
+    def test_quality_rejects_incoherent_source_identifiers(self):
+        result = synthetic_result()
+        for source in result["research"]["sources"]:
+            source["ref"] = "source-one"
+        quality = analysis._assess_result_quality(result, app.AnalyzeRequest(subject=result["subject"]))
+        self.assertFalse(quality["usable"])
+        self.assertIn("invalid reference identifiers", " ".join(quality["issues"]))
+
+    def test_quality_rejects_duplicate_source_identifiers(self):
+        result = synthetic_result()
+        result["research"]["sources"][1]["ref"] = 1
+        quality = analysis._assess_result_quality(result, app.AnalyzeRequest(subject=result["subject"]))
+        self.assertFalse(quality["usable"])
+        self.assertIn("duplicate reference identifiers", " ".join(quality["issues"]))
+
     async def test_classic_pipeline_passes_with_cited_synthetic_evidence(self):
         result = synthetic_result()
         responses = [{"queries": ["synthetic research"]}, result["sectors"], {"tree": result["tree"]["tree"]},
