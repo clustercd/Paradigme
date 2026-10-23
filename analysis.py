@@ -216,11 +216,16 @@ def _assess_result_quality(result, req):
     report_sections = (
         result.get("synthesis"), result.get("sectors"), result.get("tree"),
         result.get("projections"), result.get("turchin"), result.get("timeline"),
+        result.get("regional_timelines"),
     )
     cited_refs = set()
+    invalid_report_refs = False
     for section in report_sections:
         for text in _report_text_values(section):
             cited_refs.update(int(value) for value in re.findall(r"\[(\d+)\]", text))
+        structured_refs, invalid_refs = _structured_report_references(section)
+        cited_refs.update(structured_refs)
+        invalid_report_refs = invalid_report_refs or invalid_refs
 
     source_refs = []
     invalid_source_refs = False
@@ -275,7 +280,8 @@ def _assess_result_quality(result, req):
         score += 15
     else:
         issues.append("insufficient citation coverage in the summary")
-    citations_valid = bool(cited_refs) and not unknown_refs and not invalid_source_refs and not duplicate_refs
+    citations_valid = (bool(cited_refs) and not unknown_refs and not invalid_source_refs
+                       and not duplicate_refs and not invalid_report_refs)
     if citations_valid:
         score += 5
     else:
@@ -288,6 +294,8 @@ def _assess_result_quality(result, req):
         if duplicate_refs:
             issues.append("source list contains duplicate reference identifiers: " +
                           ", ".join(f"[{ref}]" for ref in sorted(duplicate_refs)))
+        if invalid_report_refs:
+            issues.append("report contains invalid structured reference identifiers")
     if not unsupported_numbers:
         score += 5
     else:
@@ -318,6 +326,49 @@ def _report_text_values(value):
     elif isinstance(value, (list, tuple)):
         for item in value:
             yield from _report_text_values(item)
+
+
+def _structured_report_references(value):
+    """Collect identifiers from explicit citation fields in report sections."""
+    reference_fields = {"citations", "sources_principales_utilisees"}
+    refs = set()
+    invalid = False
+
+    def collect_identifiers(item):
+        nonlocal invalid
+        if item is None:
+            return
+        if isinstance(item, (list, tuple)):
+            for child in item:
+                collect_identifiers(child)
+        elif isinstance(item, int) and not isinstance(item, bool):
+            if item > 0:
+                refs.add(item)
+            else:
+                invalid = True
+        elif isinstance(item, str):
+            match = re.fullmatch(r"\s*(?:\[(\d+)\]|(\d+))\s*", item)
+            identifier = (match.group(1) or match.group(2)) if match else None
+            if identifier and int(identifier) > 0:
+                refs.add(int(identifier))
+            else:
+                invalid = True
+        else:
+            invalid = True
+
+    def visit(item):
+        if isinstance(item, dict):
+            for key, child in item.items():
+                if key in reference_fields:
+                    collect_identifiers(child)
+                else:
+                    visit(child)
+        elif isinstance(item, (list, tuple)):
+            for child in item:
+                visit(child)
+
+    visit(value)
+    return refs, invalid
 
 
 def _summary_has_citations(candidate):
