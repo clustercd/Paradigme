@@ -175,6 +175,32 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(quality["usable"])
         self.assertIn("[999]", " ".join(quality["issues"]))
 
+    def test_quality_rejects_unknown_reference_in_regional_timelines(self):
+        result = synthetic_result()
+        result["regional_timelines"] = {"regions": [{"region": "chine", "evenements": [
+            {"titre": "Synthetic event [999]"}]}]}
+        quality = analysis._assess_result_quality(result, app.AnalyzeRequest(subject=result["subject"]))
+        self.assertFalse(quality["usable"])
+        self.assertEqual(quality["unknown_references"], [999])
+
+    def test_quality_rejects_unknown_structured_source_references(self):
+        for field in ("citations", "sources_principales_utilisees"):
+            with self.subTest(field=field):
+                result = synthetic_result()
+                result["synthesis"][field] = [999]
+                quality = analysis._assess_result_quality(
+                    result, app.AnalyzeRequest(subject=result["subject"]))
+                self.assertFalse(quality["usable"])
+                self.assertEqual(quality["unknown_references"], [999])
+
+    def test_quality_accepts_known_structured_source_references(self):
+        result = synthetic_result()
+        result["synthesis"]["sources_principales_utilisees"] = [1, "2"]
+        result["sectors"]["secteurs"][0]["citations"] = [3]
+        quality = analysis._assess_result_quality(result, app.AnalyzeRequest(subject=result["subject"]))
+        self.assertTrue(quality["usable"], quality["issues"])
+        self.assertEqual(quality["unknown_references"], [])
+
     def test_quality_rejects_incoherent_source_identifiers(self):
         result = synthetic_result()
         for source in result["research"]["sources"]:
