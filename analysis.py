@@ -182,8 +182,39 @@ async def run_analysis(jid, req, jobs, llm, cfg, log_fn):
 
     except Exception as e:
         j["status"] = "error"
-        j["error"] = str(e)
-        log_fn(jid, str(e))
+        j["result"] = None
+        j.pop("quality", None)
+        # Provider exceptions may contain response bodies, credentials, or user
+        # content. Persist only a controlled stage and exception class.
+        j["error"] = _safe_error_diagnostic(j, e)
+        log_fn(jid, j["error"])
+
+
+def _safe_error_diagnostic(job, error):
+    """Build a useful diagnostic without copying exception/provider content."""
+    step = str(job.get("step") or "analysis")
+    if step.startswith("research"):
+        stage = "source research"
+    elif step.startswith("sector analysis"):
+        stage = "sector analysis"
+    elif step.startswith("tree"):
+        stage = "decision tree generation"
+    elif step.startswith("projections"):
+        stage = "scenario generation"
+    elif step.startswith("disruptions/recommendations"):
+        stage = "recommendations"
+    elif step in {"init", "queries", "synthesis", "PDF", "email"}:
+        stage = {
+            "init": "analysis setup", "queries": "query generation",
+            "synthesis": "synthesis",
+            "PDF": "report generation", "email": "email delivery",
+        }.get(step, step)
+    else:
+        stage = "analysis"
+    error_type = type(error).__name__
+    if not error_type.isidentifier():
+        error_type = "Exception"
+    return f"Analysis failed during {stage} ({error_type}). Check the configured services and application logs."
 
 
 def _assess_result_quality(result, req):
