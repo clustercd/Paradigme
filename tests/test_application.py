@@ -143,6 +143,72 @@ class ApplicationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(jobs["fixture"]["status"], "error")
         send.assert_not_called()
 
+    async def test_report_failure_discards_generated_result(self):
+        llm = AsyncMock()
+        llm.health.return_value = {"ok": True, "active_engine": "fixture", "model": "synthetic-model"}
+        llm.engine_params = {}
+        jobs = {"fixture": {"result": None}}
+        with patch.object(analysis, "_run_classique", new=AsyncMock(return_value=synthetic_result())), \
+                patch("pdf_report.generate_pdf", side_effect=RuntimeError("private provider response")):
+            result = await analysis.run_analysis(
+                "fixture", app.AnalyzeRequest(subject="Fixture", sources={"web": False}), jobs, llm,
+                {"_reports_dir": str(self.root / "reports")}, lambda *args: None,
+            )
+        self.assertIsNone(result)
+        self.assertEqual(jobs["fixture"]["status"], "error")
+        self.assertIsNone(jobs["fixture"]["result"])
+        self.assertNotIn("private provider response", jobs["fixture"]["error"])
+
+    async def test_provider_failure_survives_memory_reset_without_private_request_data(self):
+        llm = AsyncMock()
+        llm.health.return_value = {"ok": False, "active_engine": "none"}
+        with patch.object(app, "LLMClient", return_value=llm):
+            response = await self.client.post("/api/analyze", json={
+                "subject": "Synthetic private subject",
+                "context": "Synthetic private context",
+                "sources": {"web": False},
+            })
+            jid = response.json()["job_id"]
+            await asyncio.gather(*list(app.ACTIVE_ANALYSES), return_exceptions=True)
+            app.JOBS.clear()  # Simulate a process restart.
+
+        persisted = await self.client.get(f"/api/job/{jid}")
+        self.assertEqual(persisted.status_code, 200)
+        job = persisted.json()
+        self.assertEqual(job["status"], "error")
+        self.assertIsNone(job["result"])
+        self.assertIn("RuntimeError", job["error"])
+        stored = (self.root / "results" / f"{jid}.json").read_text(encoding="utf-8")
+        self.assertNotIn("Synthetic private subject", stored)
+        self.assertNotIn("Synthetic private context", stored)
+        self.assertNotIn("synthetic-secret", stored)
+        self.assertEqual((await self.client.get("/api/history")).json(), [])
+
+    async def test_unexpected_async_exception_is_safely_persisted(self):
+        async def fail_unexpectedly(*args, **kwargs):
+            raise RuntimeError("private provider response synthetic-secret-for-tests")
+
+        with patch.object(app, "run_analysis", fail_unexpectedly):
+            response = await self.client.post("/api/analyze", json={
+                "subject": "Synthetic private subject",
+                "context": "Synthetic private context",
+            })
+            jid = response.json()["job_id"]
+            await asyncio.gather(*list(app.ACTIVE_ANALYSES), return_exceptions=True)
+            app.JOBS.clear()  # Simulate a process restart.
+
+        persisted = await self.client.get(f"/api/job/{jid}")
+        self.assertEqual(persisted.status_code, 200)
+        job = persisted.json()
+        self.assertEqual(job["status"], "error")
+        self.assertIsNone(job["result"])
+        self.assertIn("RuntimeError", job["error"])
+        self.assertNotIn("private provider response", job["error"])
+        stored = (self.root / "results" / f"{jid}.json").read_text(encoding="utf-8")
+        self.assertNotIn("private provider response", stored)
+        self.assertNotIn("synthetic-secret", stored)
+        self.assertNotIn("Synthetic private subject", stored)
+
     def test_quality_accepts_consistent_synthetic_source_references(self):
         result = synthetic_result()
         quality = analysis._assess_result_quality(result, app.AnalyzeRequest(subject=result["subject"]))
