@@ -473,14 +473,8 @@ async def gather_sources(
                 rlog.info(f"      [{kind}] {u} | {t}")
             all_results.extend(res)
 
-        # Deduplication par URL
-        seen = set()
-        deduped = []
-        for r in all_results:
-            u = r.get("url", "")
-            if u and u not in seen:
-                seen.add(u)
-                deduped.append(r)
+        # Deduplicate by URL before relevance filtering and deep fetch.
+        deduped = _deduplicate_sources(all_results)
         rlog.info(f"DEDUP: {len(all_results)} -> {len(deduped)} unique sources")
 
         if main_subject:
@@ -508,12 +502,17 @@ async def gather_sources(
                     excerpt, final_url = page
                     # Use the actual destination for citations and ranking;
                     # a trusted starting URL must not confer trust on a redirect.
+                    if final_url != r.get("url"):
+                        r["original_url"] = r.get("url", "")
                     r["url"] = final_url
                     if excerpt:
                         r["content_excerpt"] = excerpt
                         rlog.info(f"   OK: {r.get('url','')[:60]} -> {len(excerpt)} chars")
                 elif isinstance(page, Exception):
                     rlog.warning(f"   KO: {r.get('url','')[:60]} -> {page}")
+            # Redirect resolution can make separate search results identical.
+            # Merge them before ranking, numbering, counting, and LLM selection.
+            deduped = _deduplicate_sources(deduped)
             deduped.sort(key=_source_rank)
 
     # Numerotation finale for citation
@@ -528,6 +527,64 @@ async def gather_sources(
         "sources": deduped,
         "counts_by_source": counts,
     }
+
+
+def _deduplicate_sources(items: list[dict]) -> list[dict]:
+    """Merge records that resolve to the same final URL, preserving useful metadata."""
+    merged: dict[str, dict] = {}
+    for item in items:
+        url = str(item.get("url") or "")
+        if not url:
+            continue
+        existing = merged.get(url)
+        if existing is None:
+            record = dict(item)
+            record["provenance"] = _source_provenance(item, url)
+            merged[url] = record
+            continue
+
+        # A more highly ranked classification is the representative counted
+        # source, while descriptive fields retain the richest available value.
+        if _source_rank(item) < _source_rank(existing):
+            representative = dict(item)
+            representative.update(existing)
+            representative["source"] = item.get("source", existing.get("source"))
+            representative["url"] = url
+            existing.clear()
+            existing.update(representative)
+
+        for field in ("title", "snippet", "content_excerpt"):
+            values = [str(existing.get(field) or ""), str(item.get(field) or "")]
+            best = max(values, key=len)
+            if best:
+                existing[field] = best
+
+        provenance = existing.setdefault("provenance", [])
+        for entry in _source_provenance(item, url):
+            if entry not in provenance:
+                provenance.append(entry)
+        existing["url"] = url
+    return list(merged.values())
+
+
+def _source_provenance(item: dict, final_url: str) -> list[dict]:
+    """Capture the originating search result details when records are merged."""
+    provenance = item.get("provenance")
+    if isinstance(provenance, list):
+        entries = [dict(entry) for entry in provenance if isinstance(entry, dict)]
+    else:
+        entries = []
+    entry = {
+        key: item[key]
+        for key in ("source", "provider", "outlet", "date")
+        if item.get(key)
+    }
+    original_url = item.get("original_url") or item.get("url")
+    if original_url and original_url != final_url:
+        entry["original_url"] = original_url
+    if entry and entry not in entries:
+        entries.append(entry)
+    return entries
 
 
 def _count_by_source(items: list[dict]) -> dict:
