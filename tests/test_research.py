@@ -2,8 +2,12 @@
 import unittest
 
 import httpx
+from unittest.mock import patch
 
-from research import _fetch_source, _host_is_trusted, _source_rank
+from research import (
+    _fetch_source, _host_is_trusted, _source_rank,
+    format_sources_for_llm, gather_sources,
+)
 
 
 class TrustedSourceRankingTests(unittest.TestCase):
@@ -46,6 +50,70 @@ class TrustedSourceRankingTests(unittest.TestCase):
         self.assertEqual(_source_rank(ordinary), (0, 1, 1))
         self.assertEqual(_source_rank(institution), (0, 0, 1))
         self.assertEqual(_source_rank(wikipedia), (0, 0, 0))
+
+    def test_gather_sources_merges_redirects_before_refs_counts_and_llm_limit(self):
+        canonical_url = "https://canonical.test/article"
+        search_results = [
+            {"source": "web", "provider": "search_a", "title": "Article title",
+             "url": "https://alias-one.test/start", "snippet": "Short excerpt"},
+            {"source": "web", "provider": "search_b", "title": "A longer article title",
+             "url": "https://alias-two.test/start", "snippet": "A longer and more useful search excerpt"},
+            {"source": "web", "provider": "search_c", "title": "Canonical record",
+             "url": canonical_url, "snippet": "Canonical snippet"},
+        ]
+        search_results.extend(
+            {"source": "web", "provider": "search", "title": f"Distinct {i}",
+             "url": f"https://distinct-{i}.test/article", "snippet": f"Snippet {i}"}
+            for i in range(9)
+        )
+
+        async def fake_search(client, query, max_results=8):
+            return search_results
+
+        def handler(request):
+            if request.url.host.startswith("alias-"):
+                return httpx.Response(302, headers={"Location": canonical_url})
+            return httpx.Response(200, headers={"Content-Type": "text/html"},
+                                  text="<p>Resolved article excerpt</p>")
+
+        async def scenario():
+            client_class = httpx.AsyncClient
+            factory = lambda **kwargs: client_class(
+                transport=httpx.MockTransport(handler), **kwargs
+            )
+            with patch("research.search_duckduckgo", new=fake_search), \
+                 patch("research.httpx.AsyncClient", side_effect=factory):
+                return await gather_sources(
+                    ["synthetic query"],
+                    enabled={"web": True, "wikipedia": False, "actualite": False,
+                             "youtube": False, "archive": False},
+                    deep=True,
+                )
+
+        import asyncio
+        result = asyncio.run(scenario())
+        sources = result["sources"]
+        merged = [item for item in sources if item["url"] == canonical_url]
+
+        self.assertEqual(len(merged), 1)
+        self.assertEqual(len(sources), 10)
+        self.assertEqual([item["ref"] for item in sources], list(range(1, 11)))
+        self.assertEqual(result["counts_by_source"], {"web": 10})
+        self.assertEqual(merged[0]["title"], "A longer article title")
+        self.assertEqual(merged[0]["snippet"], "A longer and more useful search excerpt")
+        self.assertEqual(merged[0]["content_excerpt"], "Resolved article excerpt")
+        self.assertEqual(
+            {entry["provider"] for entry in merged[0]["provenance"]},
+            {"search_a", "search_b", "search_c"},
+        )
+        self.assertEqual(
+            {entry.get("original_url") for entry in merged[0]["provenance"]
+             if entry.get("original_url")},
+            {"https://alias-one.test/start", "https://alias-two.test/start"},
+        )
+        llm_sources = format_sources_for_llm(sources, max_sources=10)
+        self.assertEqual(llm_sources.count(canonical_url), 1)
+        self.assertEqual(llm_sources.count("["), 10)
 
     def test_redirect_destination_replaces_starting_host_for_ranking(self):
         async def scenario():
