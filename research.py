@@ -538,9 +538,7 @@ def _deduplicate_sources(items: list[dict]) -> list[dict]:
             continue
         existing = merged.get(url)
         if existing is None:
-            record = dict(item)
-            record["provenance"] = _source_provenance(item, url)
-            merged[url] = record
+            merged[url] = dict(item)
             continue
 
         # A more highly ranked classification is the representative counted
@@ -559,7 +557,7 @@ def _deduplicate_sources(items: list[dict]) -> list[dict]:
             if best:
                 existing[field] = best
 
-        provenance = existing.setdefault("provenance", [])
+        provenance = existing.setdefault("provenance", _source_provenance(existing, url))
         for entry in _source_provenance(item, url):
             if entry not in provenance:
                 provenance.append(entry)
