@@ -12,6 +12,52 @@ from typing import Any
 
 log = logging.getLogger("paradigme.research")
 
+_TRUSTED_DOMAINS = (
+    "gouv.fr", "gov", "europa.eu", "insee.fr", "who.int",
+    "un.org", "oecd.org", "wikipedia.org",
+)
+_SOURCE_PRIORITY = {
+    "wikipedia": 0, "web": 1, "actualite": 2, "youtube": 3,
+    "livre": 4, "reportage": 4, "archive_web": 5,
+}
+
+
+def _host_is_trusted(hostname: str | None) -> bool:
+    """Return whether a normalized host is an approved institutional domain."""
+    if not hostname:
+        return False
+    try:
+        # IDNA prevents visually similar Unicode hostnames from matching a
+        # trusted ASCII domain. A terminal dot is a valid DNS spelling.
+        host = hostname.rstrip(".").encode("idna").decode("ascii").lower()
+    except (UnicodeError, ValueError):
+        return False
+    return any(host == domain or host.endswith("." + domain) for domain in _TRUSTED_DOMAINS)
+
+
+def _url_host(url: str) -> str | None:
+    """Extract an HTTP(S) URL's actual hostname, ignoring path/query/userinfo."""
+    try:
+        parsed = up.urlsplit(url)
+        if parsed.scheme.lower() not in ("http", "https"):
+            return None
+        return parsed.hostname
+    except (TypeError, ValueError):
+        return None
+
+
+def _source_rank(item: dict) -> tuple[int, int, int]:
+    """Rank sources by redirect status, verified host, then source type."""
+    url = str(item.get("url", ""))
+    host = _url_host(url)
+    trusted = 0 if _host_is_trusted(host) else 1
+    normalized_host = (host or "").lower().rstrip(".")
+    redirect = int(
+        normalized_host == "news.google.com"
+        or normalized_host.endswith(".news.google.com")
+    )
+    return (redirect, trusted, _SOURCE_PRIORITY.get(item.get("source", ""), 9))
+
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36",
     "Accept-Language": "fr-FR,fr;q=0.9,en;q=0.8",
@@ -342,23 +388,31 @@ async def search_internet_archive(client: httpx.AsyncClient, query: str, max_res
 
 
 # ---------- Fetch + extraction texte d'une page ----------
-async def fetch_text(client: httpx.AsyncClient, url: str, max_chars: int = 4000) -> str:
+async def _fetch_source(client: httpx.AsyncClient, url: str, max_chars: int = 4000) -> tuple[str, str]:
+    """Fetch an excerpt and report the final URL after any HTTP redirects."""
     try:
         r = await client.get(url, headers=HEADERS, timeout=15, follow_redirects=True)
+        final_url = str(r.url)
         if r.status_code != 200:
-            return ""
+            return "", final_url
         ct = r.headers.get("content-type", "")
         if "html" not in ct and "xml" not in ct:
-            return ""
+            return "", final_url
         text = r.text
         # virer scripts/styles
         text = re.sub(r"<script[^>]*>.*?</script>", " ", text, flags=re.DOTALL | re.IGNORECASE)
         text = re.sub(r"<style[^>]*>.*?</style>", " ", text, flags=re.DOTALL | re.IGNORECASE)
         text = re.sub(r"<nav[^>]*>.*?</nav>", " ", text, flags=re.DOTALL | re.IGNORECASE)
         text = re.sub(r"<footer[^>]*>.*?</footer>", " ", text, flags=re.DOTALL | re.IGNORECASE)
-        return _clean(text)[:max_chars]
+        return _clean(text)[:max_chars], final_url
     except Exception:
-        return ""
+        return "", url
+
+
+async def fetch_text(client: httpx.AsyncClient, url: str, max_chars: int = 4000) -> str:
+    """Compatibility wrapper returning only the fetched page excerpt."""
+    text, _ = await _fetch_source(client, url, max_chars)
+    return text
 
 
 # ---------- Orchestrateur principal ----------
@@ -419,14 +473,8 @@ async def gather_sources(
                 rlog.info(f"      [{kind}] {u} | {t}")
             all_results.extend(res)
 
-        # Deduplication par URL
-        seen = set()
-        deduped = []
-        for r in all_results:
-            u = r.get("url", "")
-            if u and u not in seen:
-                seen.add(u)
-                deduped.append(r)
+        # Deduplicate by URL before relevance filtering and deep fetch.
+        deduped = _deduplicate_sources(all_results)
         rlog.info(f"DEDUP: {len(all_results)} -> {len(deduped)} unique sources")
 
         if main_subject:
@@ -438,33 +486,34 @@ async def gather_sources(
         # redirect or consent pages whose excerpts lack the article text.
         # Prefer official pages, Wikipedia, and direct web pages
         # before using news headlines as model context.
-        trusted_domains = (
-            ".gouv.fr", ".gov.", "europa.eu", "insee.fr", "who.int",
-            "un.org", "oecd.org", "wikipedia.org",
-        )
-        prio = {"wikipedia": 0, "web": 1, "actualite": 2, "youtube": 3, "livre": 4, "reportage": 4, "archive_web": 5}
-        def _source_rank(item):
-            url = str(item.get("url", "")).lower()
-            trusted = 0 if any(domain in url for domain in trusted_domains) else 1
-            redirect = 1 if "news.google.com/" in url else 0
-            return (redirect, trusted, prio.get(item.get("source", ""), 9))
         deduped.sort(key=_source_rank)
 
         # Fetch bounded excerpts from the highest-ranked pages
         if deep and on("web"):
             candidates = [r for r in deduped if r.get("source") in ("web", "wikipedia", "actualite")]
-            top_web = [r for r in candidates if "news.google.com/" not in r.get("url", "")][:6]
+            top_web = [r for r in candidates if not _source_rank(r)[0]][:6]
             rlog.info(f"DEEP FETCH: reading excerpts from {len(top_web)} pages...")
             for r in top_web:
                 rlog.info(f"   FETCH: {r.get('url','')}")
-            fetch_tasks = [fetch_text(client, r["url"]) for r in top_web]
-            texts = await asyncio.gather(*fetch_tasks, return_exceptions=True)
-            for r, t in zip(top_web, texts):
-                if isinstance(t, str) and t:
-                    r["content_excerpt"] = t
-                    rlog.info(f"   OK: {r.get('url','')[:60]} -> {len(t)} chars")
-                elif isinstance(t, Exception):
-                    rlog.warning(f"   KO: {r.get('url','')[:60]} -> {t}")
+            fetch_tasks = [_fetch_source(client, r["url"]) for r in top_web]
+            fetched = await asyncio.gather(*fetch_tasks, return_exceptions=True)
+            for r, page in zip(top_web, fetched):
+                if isinstance(page, tuple):
+                    excerpt, final_url = page
+                    # Use the actual destination for citations and ranking;
+                    # a trusted starting URL must not confer trust on a redirect.
+                    if final_url != r.get("url"):
+                        r["original_url"] = r.get("url", "")
+                    r["url"] = final_url
+                    if excerpt:
+                        r["content_excerpt"] = excerpt
+                        rlog.info(f"   OK: {r.get('url','')[:60]} -> {len(excerpt)} chars")
+                elif isinstance(page, Exception):
+                    rlog.warning(f"   KO: {r.get('url','')[:60]} -> {page}")
+            # Redirect resolution can make separate search results identical.
+            # Merge them before ranking, numbering, counting, and LLM selection.
+            deduped = _deduplicate_sources(deduped)
+            deduped.sort(key=_source_rank)
 
     # Numerotation finale for citation
     for i, r in enumerate(deduped, 1):
@@ -478,6 +527,62 @@ async def gather_sources(
         "sources": deduped,
         "counts_by_source": counts,
     }
+
+
+def _deduplicate_sources(items: list[dict]) -> list[dict]:
+    """Merge records that resolve to the same final URL, preserving useful metadata."""
+    merged: dict[str, dict] = {}
+    for item in items:
+        url = str(item.get("url") or "")
+        if not url:
+            continue
+        existing = merged.get(url)
+        if existing is None:
+            merged[url] = dict(item)
+            continue
+
+        # A more highly ranked classification is the representative counted
+        # source, while descriptive fields retain the richest available value.
+        if _source_rank(item) < _source_rank(existing):
+            representative = dict(item)
+            representative.update(existing)
+            representative["source"] = item.get("source", existing.get("source"))
+            representative["url"] = url
+            existing.clear()
+            existing.update(representative)
+
+        for field in ("title", "snippet", "content_excerpt"):
+            values = [str(existing.get(field) or ""), str(item.get(field) or "")]
+            best = max(values, key=len)
+            if best:
+                existing[field] = best
+
+        provenance = existing.setdefault("provenance", _source_provenance(existing, url))
+        for entry in _source_provenance(item, url):
+            if entry not in provenance:
+                provenance.append(entry)
+        existing["url"] = url
+    return list(merged.values())
+
+
+def _source_provenance(item: dict, final_url: str) -> list[dict]:
+    """Capture the originating search result details when records are merged."""
+    provenance = item.get("provenance")
+    if isinstance(provenance, list):
+        entries = [dict(entry) for entry in provenance if isinstance(entry, dict)]
+    else:
+        entries = []
+    entry = {
+        key: item[key]
+        for key in ("source", "provider", "outlet", "date")
+        if item.get(key)
+    }
+    original_url = item.get("original_url") or item.get("url")
+    if original_url and original_url != final_url:
+        entry["original_url"] = original_url
+    if entry and entry not in entries:
+        entries.append(entry)
+    return entries
 
 
 def _count_by_source(items: list[dict]) -> dict:
