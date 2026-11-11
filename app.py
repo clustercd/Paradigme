@@ -93,6 +93,42 @@ def save_completed_job(job_id, job):
     temp.replace(target)
 
 
+def save_failed_job(job_id, job):
+    """Persist a minimal failure record without request or provider payloads."""
+    safe = re.sub(r'[^a-zA-Z0-9_-]', '', job_id)
+    step = str(job.get("step") or "")
+    if step.startswith("research"):
+        safe_step = "research"
+    elif step.startswith("sector analysis"):
+        safe_step = "sector analysis"
+    elif step.startswith("tree"):
+        safe_step = "tree"
+    elif step.startswith("projections"):
+        safe_step = "projections"
+    elif step.startswith("disruptions/recommendations"):
+        safe_step = "recommendations"
+    elif step in {"init", "queries", "synthesis", "PDF", "email"}:
+        safe_step = step
+    else:
+        safe_step = "analysis"
+    failed = {
+        "id": safe,
+        "status": "error",
+        "step": safe_step,
+        "error": job.get("error") or "Analysis failed. Check the configured services and application logs.",
+        "started_at": job.get("started_at"),
+        "finished_at": datetime.now().isoformat(),
+        "progress": job.get("progress", 0),
+        "result": None,
+        "pdf_path": None,
+        "email": None,
+    }
+    target = RESULTS_DIR / f"{safe}.json"
+    temp = target.with_suffix(".json.tmp")
+    temp.write_text(json.dumps(failed, ensure_ascii=False, indent=2), encoding="utf-8")
+    temp.replace(target)
+
+
 def load_completed_job(job_id):
     safe = re.sub(r'[^a-zA-Z0-9_-]', '', job_id)
     path = RESULTS_DIR / f"{safe}.json"
@@ -390,6 +426,8 @@ async def analyze(req: AnalyzeRequest):
                 "quality": JOBS[jid].get("quality"),
                 "status": "done",
             })
+        elif JOBS[jid].get("status") == "error":
+            save_failed_job(jid, JOBS[jid])
 
     # Retain an asyncio task so the HTTP response returns immediately.
     # A response-attached background task can delay clients until completion;
@@ -402,13 +440,24 @@ async def analyze(req: AnalyzeRequest):
         ACTIVE_ANALYSES.discard(done_task)
         if done_task.cancelled():
             JOBS[jid]["status"] = "error"
-            JOBS[jid]["error"] = "Analysis interrupted by service shutdown"
+            JOBS[jid]["result"] = None
+            JOBS[jid]["error"] = "Analysis interrupted by service shutdown."
+            save_failed_job(jid, JOBS[jid])
             return
         error = done_task.exception()
         if error is not None:
             JOBS[jid]["status"] = "error"
-            JOBS[jid]["error"] = str(error)
-            log.exception("[%s] asynchronous analysis failed", jid[:8], exc_info=error)
+            JOBS[jid]["result"] = None
+            JOBS[jid].pop("quality", None)
+            error_type = type(error).__name__
+            if not error_type.isidentifier():
+                error_type = "Exception"
+            JOBS[jid]["error"] = (
+                f"Analysis stopped unexpectedly ({error_type}). "
+                "Check the configured services and application logs."
+            )
+            log.error("[%s] asynchronous analysis failed (%s)", jid[:8], error_type)
+            save_failed_job(jid, JOBS[jid])
 
     task.add_done_callback(_analysis_done)
     return {"job_id": jid}
